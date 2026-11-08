@@ -1,0 +1,81 @@
+name: Node.js CD
+
+# Run CD only after the CI workflow completes
+on:
+  workflow_run:
+    workflows: ["Node.js CI"]
+    types: [completed]
+    branches: [main]
+
+# Permissions required for OIDC authentication
+permissions:
+  id-token: write
+  contents: read
+
+# Azure resource configuration
+env:
+  AZURE_CONTAINER_REGISTRY: nodejsdemoacrdev2026
+  IMAGE_NAME: nodejs-azure-cicd-demo
+  WEB_APP_NAME: nodejsdemo-app-dev2026
+  RESOURCE_GROUP: nodejs-demo-rg
+
+jobs:
+  deploy:
+    name: Build and deploy to Azure
+    runs-on: ubuntu-latest
+
+    # Deploy only after successful CI on a push to main
+    if: >-
+      ${{
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_branch == 'main'
+      }}
+
+    steps:
+      # Download the exact commit tested by CI
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      # Authenticate to Azure using OIDC
+      - name: Log in to Azure using OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # Authenticate to Azure Container Registry
+      - name: Log in to Azure Container Registry
+        run: az acr login --name ${{ env.AZURE_CONTAINER_REGISTRY }}
+
+      # Build and push Docker image with a unique commit SHA tag
+      - name: Build and push Docker image
+        run: |
+          IMAGE_TAG=${{ github.event.workflow_run.head_sha }}
+
+          docker build \
+            -t ${{ env.AZURE_CONTAINER_REGISTRY }}.azurecr.io/${{ env.IMAGE_NAME }}:${IMAGE_TAG} .
+
+          docker push \
+            ${{ env.AZURE_CONTAINER_REGISTRY }}.azurecr.io/${{ env.IMAGE_NAME }}:${IMAGE_TAG}
+
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_ENV
+
+      # Configure Azure Web App to use the new image
+      - name: Configure Azure Web App
+        run: |
+          az webapp config container set \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --name ${{ env.WEB_APP_NAME }} \
+            --container-image-name ${{ env.AZURE_CONTAINER_REGISTRY }}.azurecr.io/${{ env.IMAGE_NAME }}:${IMAGE_TAG} \
+            --container-registry-url https://${{ env.AZURE_CONTAINER_REGISTRY }}.azurecr.io
+
+      # Restart the Web App to apply the new image
+      - name: Restart Azure Web App
+        run: |
+          az webapp restart \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --name ${{ env.WEB_APP_NAME }}
